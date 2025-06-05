@@ -1,25 +1,26 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 import numpy as np
 import onnxruntime as ort
 import io
+import requests
 
 app = FastAPI()
 
-# 开放 CORS 权限（给 Coze 调用）
+# 开放跨域权限（允许 Coze 访问）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 可以指定为 Coze 的插件调用域名
+    allow_origins=["*"],  # 或指定为 Coze 的域名
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 加载模型
+# 加载 ONNX 模型
 session = ort.InferenceSession("best.onnx", providers=["CPUExecutionProvider"])
 
-# 假设模型的输入为 (1, 3, 224, 224)，输出为 [1, num_classes]
+# 假设模型输入为 (1, 3, 224, 224)
 def preprocess(image: Image.Image) -> np.ndarray:
     image = image.resize((224, 224))
     image = np.array(image).astype(np.float32) / 255.0
@@ -28,9 +29,10 @@ def preprocess(image: Image.Image) -> np.ndarray:
     image = np.transpose(image, (2, 0, 1))  # HWC → CHW
     return image[np.newaxis, :]
 
-# 类别名（可根据你的训练数据集设置）
+# 模型类别标签（根据你训练时的分类顺序）
 labels = ["长针绣", "平针绣", "乱针绣", "十字绣", "其他"]
 
+# ✅ 方法一：POST 上传图片
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     image_bytes = await file.read()
@@ -43,6 +45,26 @@ async def predict(file: UploadFile = File(...)):
     label = labels[pred_class]
 
     return {
-        "predicted_class": label,
-        "confidence": float(np.max(probs))
+        "刺绣类别": label,
+        "置信度": round(float(np.max(probs)), 4)
+    }
+
+# ✅ 方法二：GET 请求图片链接
+@app.get("/predict_by_url")
+def predict_by_url(img_url: str = Query(..., description="刺绣图片的URL")):
+    try:
+        response = requests.get(img_url)
+        image = Image.open(io.BytesIO(response.content)).convert("RGB")
+    except Exception as e:
+        return {"error": f"无法处理图片: {str(e)}"}
+
+    input_tensor = preprocess(image)
+    outputs = session.run(None, {"images": input_tensor})
+    probs = outputs[0][0]
+    pred_class = int(np.argmax(probs))
+    label = labels[pred_class]
+
+    return {
+        "刺绣类别": label,
+        "置信度": round(float(np.max(probs)), 4)
     }
